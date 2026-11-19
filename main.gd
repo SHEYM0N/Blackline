@@ -2,9 +2,10 @@ extends Node3D
 # BLACKLINE - Godot 4.3, Mobile renderer. The whole game is generated from code.
 
 const H := 3.2
+const CS_STYLE := true  # CS-like look: bright clean lighting, no bodycam post-process, green crosshair. Set false for the bodycam look.
 const BODYCAM := """
 shader_type canvas_item;
-uniform sampler2D scr : hint_screen_texture, filter_linear_mipmap;
+uniform sampler2D scr : hint_screen_texture, filter_linear;
 void fragment() {
     vec2 uv = SCREEN_UV;
     vec2 c = uv - 0.5;
@@ -12,7 +13,6 @@ void fragment() {
     vec2 p = clamp(0.5 + c * (1.0 + 0.34 * r2), vec2(0.002), vec2(0.998));
     vec2 o = c * 0.05 * r2;
     vec3 col = vec3(texture(scr, clamp(p + o, vec2(0.002), vec2(0.998))).r, texture(scr, p).g, texture(scr, clamp(p - o, vec2(0.002), vec2(0.998))).b);
-    col = mix(col, textureLod(scr, p, 2.0).rgb, smoothstep(0.06, 0.3, r2) * 0.5);
     col *= 1.0 - 0.5 * smoothstep(0.1, 0.5, r2);
     col += (fract(sin(dot(uv * vec2(1731.0, 977.0) + TIME, vec2(12.9898, 78.233))) * 43758.5453) - 0.5) * 0.035;
     col *= 1.0 + 0.02 * sin(TIME * 0.8) * sin(TIME * 2.3);
@@ -82,13 +82,20 @@ var kick := 0.0
 var shot_pos := Vector3.ZERO
 var shot_t := -99.0
 var vel_h := Vector3.ZERO
+var adapt_t := 0.0
+var vcmat: StandardMaterial3D
 
 
 func _ready() -> void:
     randomize()
+    Engine.max_fps = 60
+    var vp0 := get_viewport()
+    vp0.scaling_3d_mode = Viewport.SCALING_3D_MODE_FSR
+    vp0.scaling_3d_scale = 0.75
     _env()
     _materials()
     _world()
+    _details()
     _forest()
     _player()
     _ui()
@@ -103,35 +110,37 @@ func _env() -> void:
     var e := Environment.new()
     var sky := Sky.new()
     var sm := ProceduralSkyMaterial.new()
-    sm.sky_top_color = Color(0.45, 0.55, 0.55)
-    sm.sky_horizon_color = Color(0.72, 0.78, 0.68)
+    sm.sky_top_color = Color(0.32, 0.5, 0.82) if CS_STYLE else Color(0.45, 0.55, 0.55)
+    sm.sky_horizon_color = Color(0.75, 0.85, 0.95) if CS_STYLE else Color(0.72, 0.78, 0.68)
     sm.ground_horizon_color = Color(0.5, 0.55, 0.45)
     sm.ground_bottom_color = Color(0.25, 0.3, 0.22)
     sky.sky_material = sm
     e.sky = sky
     e.background_mode = Environment.BG_SKY
     e.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
-    e.ambient_light_energy = 0.9
-    e.tonemap_mode = Environment.TONE_MAPPER_ACES
+    e.ambient_light_energy = 1.25 if CS_STYLE else 0.9
+    e.tonemap_mode = Environment.TONE_MAPPER_LINEAR if CS_STYLE else Environment.TONE_MAPPER_ACES
     e.tonemap_exposure = 1.05
-    e.glow_enabled = true
+    e.glow_enabled = false
     e.glow_intensity = 0.5
     e.glow_bloom = 0.05
-    e.fog_enabled = true
+    e.fog_enabled = not CS_STYLE
     e.fog_light_color = Color(0.64, 0.7, 0.6)
     e.fog_density = 0.012
     e.adjustment_enabled = true
-    e.adjustment_saturation = 0.85
-    e.adjustment_contrast = 1.08
+    e.adjustment_saturation = 1.1 if CS_STYLE else 0.85
+    e.adjustment_contrast = 1.0 if CS_STYLE else 1.08
     var we := WorldEnvironment.new()
     we.environment = e
     add_child(we)
     var sun := DirectionalLight3D.new()
     sun.rotation_degrees = Vector3(-52, -30, 0)
-    sun.light_energy = 1.25
+    sun.light_energy = 1.7 if CS_STYLE else 1.25
     sun.light_color = Color(1, 0.94, 0.82)
     sun.shadow_enabled = true
-    sun.directional_shadow_max_distance = 70.0
+    sun.directional_shadow_max_distance = 45.0
+    sun.shadow_blur = 0.4 if CS_STYLE else 1.0
+    sun.directional_shadow_mode = DirectionalLight3D.SHADOW_ORTHOGONAL
     add_child(sun)
 
 
@@ -147,11 +156,11 @@ func _noise(c1: Color, c2: Color, freq: float, sd: int, normal: bool) -> NoiseTe
     var n := FastNoiseLite.new()
     n.frequency = freq
     n.seed = sd
-    n.fractal_octaves = 4
+    n.fractal_octaves = 3
     var t := NoiseTexture2D.new()
     t.noise = n
-    t.width = 512
-    t.height = 512
+    t.width = 256
+    t.height = 256
     t.seamless = true
     if normal:
         t.as_normal_map = true
@@ -164,12 +173,12 @@ func _noise(c1: Color, c2: Color, freq: float, sd: int, normal: bool) -> NoiseTe
     return t
 
 
-func _mat(key: String, id: String, c1: Color, c2: Color, freq: float, sc: float, rough: float = 0.85) -> void:
+func _mat(key: String, id: String, c1: Color, c2: Color, freq: float, sc: float, rough: float = 0.85, nrm: bool = false) -> void:
     var m := StandardMaterial3D.new()
     var col := _tex(id, "Color")
     if col != null:
         m.albedo_texture = col
-        var nm := _tex(id, "NormalGL")
+        var nm: Texture2D = _tex(id, "NormalGL") if nrm else null
         if nm != null:
             m.normal_enabled = true
             m.normal_texture = nm
@@ -179,9 +188,10 @@ func _mat(key: String, id: String, c1: Color, c2: Color, freq: float, sc: float,
     else:
         var sd := absi(key.hash()) % 9999
         m.albedo_texture = _noise(c1, c2, freq, sd, false)
-        m.normal_enabled = true
-        m.normal_texture = _noise(c1, c2, freq * 2.0, sd + 1, true)
-        m.normal_scale = 0.8
+        if nrm:
+            m.normal_enabled = true
+            m.normal_texture = _noise(c1, c2, freq * 2.0, sd + 1, true)
+            m.normal_scale = 0.8
     m.roughness = rough
     m.uv1_triplanar = true
     m.uv1_world_triplanar = true
@@ -190,9 +200,9 @@ func _mat(key: String, id: String, c1: Color, c2: Color, freq: float, sc: float,
 
 
 func _materials() -> void:
-    _mat("wall", "PaintedPlaster017", Color(0.6, 0.57, 0.5), Color(0.85, 0.82, 0.72), 0.01, 0.3)
-    _mat("floor", "WoodFloor041", Color(0.2, 0.12, 0.06), Color(0.45, 0.3, 0.17), 0.02, 0.45, 0.6)
-    _mat("ground", "Ground037", Color(0.16, 0.2, 0.09), Color(0.4, 0.36, 0.2), 0.006, 0.1, 0.95)
+    _mat("wall", "PaintedPlaster017", Color(0.6, 0.57, 0.5), Color(0.85, 0.82, 0.72), 0.01, 0.3, 0.85, true)
+    _mat("floor", "WoodFloor041", Color(0.2, 0.12, 0.06), Color(0.45, 0.3, 0.17), 0.02, 0.45, 0.6, true)
+    _mat("ground", "Ground037", Color(0.16, 0.2, 0.09), Color(0.4, 0.36, 0.2), 0.006, 0.1, 0.95, true)
     _mat("bark", "Bark001", Color(0.12, 0.09, 0.06), Color(0.32, 0.24, 0.16), 0.03, 0.5)
     _mat("leaf", "", Color(0.1, 0.2, 0.06), Color(0.3, 0.45, 0.14), 0.05, 0.4, 0.9)
     _mat("conc", "Concrete034", Color(0.4, 0.4, 0.38), Color(0.62, 0.62, 0.58), 0.02, 0.25)
@@ -200,6 +210,16 @@ func _materials() -> void:
     _mat("fabric", "", Color(0.25, 0.3, 0.22), Color(0.4, 0.45, 0.33), 0.08, 0.8, 0.95)
     _mat("metal", "", Color(0.5, 0.52, 0.54), Color(0.7, 0.72, 0.74), 0.02, 0.6, 0.35)
     mats["metal"].metallic = 0.6
+    _mat("trim", "", Color(0.78, 0.76, 0.7), Color(0.95, 0.93, 0.88), 0.02, 0.6, 0.45)
+    var gm := StandardMaterial3D.new()
+    gm.albedo_color = Color(0.7, 0.85, 0.9, 0.16)
+    gm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+    gm.roughness = 0.05
+    mats["glass"] = gm
+    vcmat = StandardMaterial3D.new()
+    vcmat.vertex_color_use_as_albedo = true
+    vcmat.roughness = 0.75
+    vcmat.cull_mode = BaseMaterial3D.CULL_DISABLED
 
 
 # ---------------------------------------------------------------- world
@@ -226,7 +246,13 @@ func _seg(p: Vector2, q: Vector2, y0: float, y1: float) -> void:
     if p.distance_to(q) < 0.05 or y1 - y0 < 0.05:
         return
     var c := (p + q) / 2.0
-    box(Vector3(c.x, (y0 + y1) / 2.0, c.y), Vector3(maxf(absf(q.x - p.x), 0.3), y1 - y0, maxf(absf(q.y - p.y), 0.3)), "wall")
+    var sx := maxf(absf(q.x - p.x), 0.3)
+    var sz := maxf(absf(q.y - p.y), 0.3)
+    box(Vector3(c.x, (y0 + y1) / 2.0, c.y), Vector3(sx, y1 - y0, sz), "wall")
+    if y0 < 0.01:
+        box(Vector3(c.x, 0.07, c.y), Vector3(sx + 0.05, 0.14, sz + 0.05), "trim", false)
+    if y1 > H - 0.01:
+        box(Vector3(c.x, H - 0.06, c.y), Vector3(sx + 0.05, 0.12, sz + 0.05), "trim", false)
 
 
 # gaps: [center_along_wall, width, y_bottom, y_top]  (doors: y_bottom 0, windows: y_bottom 1.0)
@@ -246,6 +272,7 @@ func wall(a: Vector2, b: Vector2, gaps: Array = []) -> void:
         if g[2] > 0.0:
             _seg(c - hw, c + hw, 0.0, g[2])
         _seg(c - hw, c + hw, g[3], H)
+        _frame(c, dir, g)
 
 
 func _world() -> void:
@@ -277,16 +304,16 @@ func _world() -> void:
     ]
     for p in props:
         box(Vector3(p[0], p[3] / 2.0, p[1]), Vector3(p[2], p[3], p[4]), p[5])
-    for l in [Vector2(-9.5, -7), Vector2(-9.5, 3), Vector2(9.5, -7), Vector2(9.5, 3), Vector2(0, -4), Vector2(0, 4), Vector2(0, 10), Vector2(-9.5, 10), Vector2(9.5, 10)]:
+    for l in [Vector2(-9.5, -7), Vector2(-9.5, 3), Vector2(9.5, -7), Vector2(9.5, 3), Vector2(0, -4), Vector2(0, 9)]:
         var o := OmniLight3D.new()
         o.position = Vector3(l.x, H - 0.4, l.y)
-        o.omni_range = 9.0
-        o.light_energy = 1.1
+        o.omni_range = 11.0
+        o.light_energy = 1.3
         o.light_color = Color(1, 0.88, 0.7)
         add_child(o)
 
 
-func _mm(mesh: Mesh, xf: Array) -> void:
+func _mm(mesh: Mesh, xf: Array, shadows: bool = true) -> void:
     var mm := MultiMesh.new()
     mm.transform_format = MultiMesh.TRANSFORM_3D
     mm.mesh = mesh
@@ -295,6 +322,8 @@ func _mm(mesh: Mesh, xf: Array) -> void:
         mm.set_instance_transform(i, xf[i])
     var mi := MultiMeshInstance3D.new()
     mi.multimesh = mm
+    if not shadows:
+        mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
     add_child(mi)
 
 
@@ -303,7 +332,7 @@ func _forest() -> void:
     var crowns: Array = []
     var tries := 0
     var count := 0
-    while count < 70 and tries < 900:
+    while count < 45 and tries < 900:
         tries += 1
         var a := randf() * TAU
         var r := randf_range(24.0, 95.0)
@@ -328,22 +357,26 @@ func _forest() -> void:
     cyl.top_radius = 0.18
     cyl.bottom_radius = 0.3
     cyl.height = 7.0
+    cyl.radial_segments = 7
+    cyl.rings = 1
     cyl.material = mats["bark"]
     _mm(cyl, trunks)
     var sp := SphereMesh.new()
     sp.radius = 0.5
     sp.height = 1.0
+    sp.radial_segments = 10
+    sp.rings = 6
     sp.material = mats["leaf"]
     _mm(sp, crowns)
     var bushes: Array = []
     var rocks: Array = []
-    for i in 200:
+    for i in 120:
         var p := Vector2(randf_range(-100, 100), randf_range(-100, 100))
         if absf(p.x) < 17.5 and absf(p.y) < 13.5:
             continue
         if absf(p.x) < 4.0 and p.y > 12.0:
             continue
-        if i < 150:
+        if i < 90:
             bushes.append(Transform3D(Basis.IDENTITY.scaled(Vector3(1.8, 1.1, 1.8)), Vector3(p.x, 0.4, p.y)))
         else:
             rocks.append(Transform3D(Basis(Vector3.UP, randf() * TAU).scaled(Vector3(1.3, 0.8, 1.6)), Vector3(p.x, 0.2, p.y)))
@@ -351,8 +384,179 @@ func _forest() -> void:
     var rm := SphereMesh.new()
     rm.radius = 0.5
     rm.height = 1.0
+    rm.radial_segments = 8
+    rm.rings = 5
     rm.material = mats["conc"]
     _mm(rm, rocks)
+
+
+# ---------------------------------------------------------------- detail pass (frames, glass, art, ivy, grass)
+func _frame(c: Vector2, dir: Vector2, g: Array) -> void:
+    var w: float = g[1]
+    var y0: float = g[2]
+    var y1: float = g[3]
+    var along := absf(dir.x) > 0.5
+    var t := 0.06
+    var parts: Array = [
+        [-(w - t) / 2.0, (y0 + y1) / 2.0, t, y1 - y0],
+        [(w - t) / 2.0, (y0 + y1) / 2.0, t, y1 - y0],
+        [0.0, y1 - t / 2.0, w, t]
+    ]
+    if y0 > 0.0:
+        parts.append([0.0, y0 + t / 2.0, w, t])
+        parts.append([0.0, (y0 + y1) / 2.0, t * 0.6, y1 - y0])
+    for pt in parts:
+        var off: Vector2 = dir * pt[0]
+        var sz := Vector3(pt[2], pt[3], 0.36) if along else Vector3(0.36, pt[3], pt[2])
+        box(Vector3(c.x + off.x, pt[1], c.y + off.y), sz, "trim", false)
+    if y0 > 0.0:
+        var gl := MeshInstance3D.new()
+        var bm := BoxMesh.new()
+        bm.size = Vector3(w, y1 - y0, 0.02) if along else Vector3(0.02, y1 - y0, w)
+        gl.mesh = bm
+        gl.material_override = mats["glass"]
+        gl.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+        gl.position = Vector3(c.x, (y0 + y1) / 2.0, c.y)
+        add_child(gl)
+
+
+func _alpha_mat(tx: Texture2D) -> StandardMaterial3D:
+    var m := StandardMaterial3D.new()
+    m.albedo_texture = tx
+    m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+    m.alpha_scissor_threshold = 0.5
+    m.cull_mode = BaseMaterial3D.CULL_DISABLED
+    m.roughness = 0.9
+    return m
+
+
+func _ivy_tex() -> ImageTexture:
+    var im := Image.create(128, 128, false, Image.FORMAT_RGBA8)
+    im.fill(Color(0, 0, 0, 0))
+    for i in 70:
+        var cx := randi_range(8, 120)
+        var cy := randi_range(8, 120)
+        var rr := randi_range(4, 8)
+        var col := Color(randf_range(0.1, 0.22), randf_range(0.28, 0.5), randf_range(0.06, 0.14), 1.0)
+        for x in range(cx - rr, cx + rr + 1):
+            for y in range(cy - rr, cy + rr + 1):
+                if x >= 0 and x < 128 and y >= 0 and y < 128:
+                    var dx := float(x - cx) / rr
+                    var dy := float(y - cy) / (rr * 0.65)
+                    if dx * dx + dy * dy < 1.0:
+                        im.set_pixel(x, y, col)
+    return ImageTexture.create_from_image(im)
+
+
+func _grass_tex() -> ImageTexture:
+    var im := Image.create(64, 64, false, Image.FORMAT_RGBA8)
+    im.fill(Color(0, 0, 0, 0))
+    for i in 16:
+        var x0 := randf_range(8.0, 56.0)
+        var hgt := randi_range(26, 62)
+        var lean := randf_range(-0.35, 0.35)
+        var col := Color(randf_range(0.18, 0.32), randf_range(0.38, 0.6), randf_range(0.08, 0.16), 1.0)
+        for s in hgt:
+            var t := float(s) / hgt
+            var px := int(x0 + lean * s)
+            var w := 2 if t < 0.6 else 1
+            for k in w:
+                if px + k >= 0 and px + k < 64:
+                    im.set_pixel(px + k, 63 - s, col.darkened(0.3 * (1.0 - t)))
+    return ImageTexture.create_from_image(im)
+
+
+func _art(p: Vector3, on_x: bool, w: float, h: float, c: Color) -> void:
+    var fs := Vector3(0.05, h, w) if on_x else Vector3(w, h, 0.05)
+    box(p, fs, "wood", false)
+    var inn := Vector3(0.07, h - 0.12, w - 0.12) if on_x else Vector3(w - 0.12, h - 0.12, 0.07)
+    _vp(self, p, inn, c, 0.8)
+
+
+func _details() -> void:
+    for a in [[-2.83, -8.0, 0.5], [-2.83, 6.0, 0.45], [2.83, -8.0, 0.4], [2.83, 6.0, 0.35]]:
+        _art(Vector3(a[0], 1.75, a[1]), true, 1.0, 0.7, Color(a[2], a[2] * 0.75, a[2] * 0.5))
+    _art(Vector3(-15.83, 1.75, 5.0), true, 1.8, 1.1, Color(0.22, 0.3, 0.26))
+    _art(Vector3(9.5, 1.8, -11.83), false, 2.2, 1.0, Color(0.32, 0.26, 0.2))
+    _art(Vector3(-9.5, 1.8, -11.83), false, 1.2, 0.8, Color(0.28, 0.3, 0.36))
+    var ivy := _alpha_mat(_ivy_tex())
+    var ixf: Array = []
+    for i in 26:
+        var side := randi() % 4
+        var along := randf_range(-14.5, 14.5)
+        if side < 2 and absf(along) < 1.8:
+            continue
+        var pos := Vector3(along, 0.0, 12.18)
+        var yaw := 0.0
+        if side == 1:
+            pos = Vector3(along, 0.0, -12.18)
+            yaw = PI
+        elif side == 2:
+            pos = Vector3(-16.18, 0.0, along * 0.8)
+            yaw = -PI / 2.0
+        elif side == 3:
+            pos = Vector3(16.18, 0.0, along * 0.8)
+            yaw = PI / 2.0
+        var sw := randf_range(1.6, 2.6)
+        var sh := randf_range(1.4, 3.0)
+        ixf.append(Transform3D(Basis(Vector3.UP, yaw) * Basis.from_scale(Vector3(sw, sh, 1.0)), pos + Vector3(0.0, sh / 2.0, 0.0)))
+    var iq := QuadMesh.new()
+    iq.size = Vector2(1.0, 1.0)
+    iq.material = ivy
+    _mm(iq, ixf, false)
+    var gmat := _alpha_mat(_grass_tex())
+    for rot in [0.0, PI / 2.0]:
+        var xf: Array = []
+        for i in 220:
+            var p := Vector2(randf_range(-45.0, 45.0), randf_range(-45.0, 45.0))
+            if absf(p.x) < 18.5 and absf(p.y) < 14.5:
+                continue
+            if absf(p.x) < 2.5 and p.y > 12.0:
+                continue
+            xf.append(Transform3D(Basis(Vector3.UP, rot + randf() * 0.4), Vector3(p.x, 0.0, p.y)))
+        var qm := QuadMesh.new()
+        qm.size = Vector2(1.2, 0.8)
+        qm.center_offset = Vector3(0.0, 0.4, 0.0)
+        qm.material = gmat
+        _mm(qm, xf, false)
+
+
+# ---------------------------------------------------------------- merged vertex-colour meshes
+func _sbox(st: SurfaceTool, c: Vector3, s: Vector3, col: Color) -> void:
+    var h := s / 2.0
+    var faces := [
+        [Vector3(0, 0, 1), Vector3(1, 0, 0), Vector3(0, 1, 0)],
+        [Vector3(0, 0, -1), Vector3(-1, 0, 0), Vector3(0, 1, 0)],
+        [Vector3(1, 0, 0), Vector3(0, 0, -1), Vector3(0, 1, 0)],
+        [Vector3(-1, 0, 0), Vector3(0, 0, 1), Vector3(0, 1, 0)],
+        [Vector3(0, 1, 0), Vector3(1, 0, 0), Vector3(0, 0, -1)],
+        [Vector3(0, -1, 0), Vector3(1, 0, 0), Vector3(0, 0, 1)]
+    ]
+    for f in faces:
+        var n: Vector3 = f[0]
+        var u: Vector3 = f[1] * h
+        var v: Vector3 = f[2] * h
+        var o: Vector3 = n * h
+        var p0 := c + o - u - v
+        var p1 := c + o + u - v
+        var p2 := c + o + u + v
+        var p3 := c + o - u + v
+        for p in [p0, p1, p2, p0, p2, p3]:
+            st.set_color(col)
+            st.set_normal(n)
+            st.add_vertex(p)
+
+
+func _vmesh(parts: Array) -> MeshInstance3D:
+    var st := SurfaceTool.new()
+    st.begin(Mesh.PRIMITIVE_TRIANGLES)
+    for p in parts:
+        _sbox(st, p[0], p[1], p[2])
+    var mi := MeshInstance3D.new()
+    mi.mesh = st.commit()
+    mi.material_override = vcmat
+    mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+    return mi
 
 
 # ---------------------------------------------------------------- player + viewmodel
@@ -387,7 +591,7 @@ func _player() -> void:
     cam.position = Vector3(0, 1.62, 0)
     cam.fov = 78.0
     cam.near = 0.04
-    cam.far = 400.0
+    cam.far = 160.0
     player.add_child(cam)
     cam.current = true
     vm = Node3D.new()
@@ -395,52 +599,55 @@ func _player() -> void:
     var dark := Color(0.1, 0.1, 0.11)
     var wood := Color(0.33, 0.19, 0.1)
     var glove := Color(0.05, 0.05, 0.05)
-    # left forearm + tactical watch (shared by both weapons)
     var fa := Node3D.new()
     fa.position = Vector3(-0.1, -0.13, -0.1)
     fa.rotation_degrees = Vector3(8, -18, 0)
     vm.add_child(fa)
-    _vp(fa, Vector3.ZERO, Vector3(0.07, 0.07, 0.36), Color(0.18, 0.2, 0.16))
-    _vp(fa, Vector3(0, 0, 0.07), Vector3(0.078, 0.078, 0.03), glove)
-    _vp(fa, Vector3(0, 0.042, 0.07), Vector3(0.056, 0.014, 0.062), Color(0.16, 0.17, 0.18), 0.4, 0.5)
+    fa.add_child(_vmesh([
+        [Vector3.ZERO, Vector3(0.07, 0.07, 0.36), Color(0.2, 0.22, 0.17)],
+        [Vector3(0, 0, 0.07), Vector3(0.078, 0.078, 0.03), glove],
+        [Vector3(0, 0.042, 0.07), Vector3(0.056, 0.014, 0.062), Color(0.16, 0.17, 0.18)],
+        [Vector3(0, 0.05, 0.07), Vector3(0.04, 0.003, 0.03), Color(0.3, 0.8, 0.35)]
+    ]))
     wlbl = Label3D.new()
     wlbl.text = "00:00"
     wlbl.pixel_size = 0.0006
     wlbl.font_size = 36
     wlbl.modulate = Color(0.65, 1.0, 0.55)
     wlbl.shaded = false
-    wlbl.position = Vector3(0, 0.051, 0.07)
+    wlbl.position = Vector3(0, 0.052, 0.07)
     wlbl.rotation_degrees = Vector3(-90, 0, 0)
     fa.add_child(wlbl)
-    # AK
     vm_ak = Node3D.new()
     vm.add_child(vm_ak)
-    _vp(vm_ak, Vector3(0, 0, 0), Vector3(0.05, 0.07, 0.46), dark, 0.4, 0.6)
-    _vp(vm_ak, Vector3(0, 0.045, 0.02), Vector3(0.045, 0.02, 0.4), dark, 0.4, 0.6)
-    _vp(vm_ak, Vector3(0, 0.012, -0.42), Vector3(0.022, 0.022, 0.4), dark, 0.3, 0.8)
-    _vp(vm_ak, Vector3(0, 0.04, -0.6), Vector3(0.012, 0.04, 0.012), dark)
-    _vp(vm_ak, Vector3(0, 0.04, -0.28), Vector3(0.02, 0.02, 0.3), dark)
-    _vp(vm_ak, Vector3(0, -0.005, -0.27), Vector3(0.06, 0.065, 0.26), wood, 0.7)
-    var mag := _vp(vm_ak, Vector3(0, -0.12, 0.04), Vector3(0.04, 0.17, 0.08), dark, 0.4, 0.5)
-    mag.rotation_degrees = Vector3(12, 0, 0)
-    _vp(vm_ak, Vector3(0, -0.03, 0.34), Vector3(0.045, 0.09, 0.24), wood, 0.7)
-    _vp(vm_ak, Vector3(0, -0.09, 0.14), Vector3(0.04, 0.1, 0.05), wood, 0.7)
-    _vp(vm_ak, Vector3(0.0, -0.1, 0.17), Vector3(0.07, 0.08, 0.1), glove, 0.9)
-    _vp(vm_ak, Vector3(0.0, -0.03, -0.27), Vector3(0.075, 0.075, 0.14), glove, 0.9)
-    # AWM
+    vm_ak.add_child(_vmesh([
+        [Vector3(0, 0, 0), Vector3(0.05, 0.07, 0.46), dark],
+        [Vector3(0, 0.045, 0.02), Vector3(0.045, 0.02, 0.4), dark],
+        [Vector3(0, 0.012, -0.42), Vector3(0.022, 0.022, 0.4), dark],
+        [Vector3(0, 0.04, -0.6), Vector3(0.012, 0.04, 0.012), dark],
+        [Vector3(0, 0.04, -0.28), Vector3(0.02, 0.02, 0.3), dark],
+        [Vector3(0, -0.005, -0.27), Vector3(0.06, 0.065, 0.26), wood],
+        [Vector3(0, -0.12, 0.04), Vector3(0.04, 0.17, 0.08), dark],
+        [Vector3(0, -0.03, 0.34), Vector3(0.045, 0.09, 0.24), wood],
+        [Vector3(0, -0.09, 0.14), Vector3(0.04, 0.1, 0.05), wood],
+        [Vector3(0, -0.1, 0.17), Vector3(0.07, 0.08, 0.1), glove],
+        [Vector3(0, -0.03, -0.27), Vector3(0.075, 0.075, 0.14), glove]
+    ]))
     vm_aw = Node3D.new()
     vm_aw.visible = false
     vm.add_child(vm_aw)
-    _vp(vm_aw, Vector3(0, 0, 0.0), Vector3(0.055, 0.075, 0.62), Color(0.12, 0.14, 0.11), 0.5, 0.4)
-    _vp(vm_aw, Vector3(0, 0.01, -0.62), Vector3(0.026, 0.026, 0.62), dark, 0.3, 0.8)
-    _vp(vm_aw, Vector3(0, 0.012, -0.96), Vector3(0.04, 0.04, 0.1), dark, 0.3, 0.8)
-    _vp(vm_aw, Vector3(0, 0.085, -0.02), Vector3(0.05, 0.05, 0.3), dark, 0.3, 0.7)
-    _vp(vm_aw, Vector3(0, 0.085, 0.14), Vector3(0.062, 0.062, 0.05), dark, 0.3, 0.7)
-    _vp(vm_aw, Vector3(0, 0.085, -0.18), Vector3(0.062, 0.062, 0.05), dark, 0.3, 0.7)
-    _vp(vm_aw, Vector3(0, -0.04, 0.42), Vector3(0.05, 0.12, 0.3), Color(0.12, 0.14, 0.11), 0.6)
-    _vp(vm_aw, Vector3(0, -0.1, 0.04), Vector3(0.04, 0.1, 0.08), dark)
-    _vp(vm_aw, Vector3(0.0, -0.1, 0.2), Vector3(0.07, 0.08, 0.1), glove, 0.9)
-    _vp(vm_aw, Vector3(0.0, -0.03, -0.3), Vector3(0.075, 0.075, 0.14), glove, 0.9)
+    vm_aw.add_child(_vmesh([
+        [Vector3(0, 0, 0), Vector3(0.055, 0.075, 0.62), Color(0.12, 0.14, 0.11)],
+        [Vector3(0, 0.01, -0.62), Vector3(0.026, 0.026, 0.62), dark],
+        [Vector3(0, 0.012, -0.96), Vector3(0.04, 0.04, 0.1), dark],
+        [Vector3(0, 0.085, -0.02), Vector3(0.05, 0.05, 0.3), dark],
+        [Vector3(0, 0.085, 0.14), Vector3(0.062, 0.062, 0.05), dark],
+        [Vector3(0, 0.085, -0.18), Vector3(0.062, 0.062, 0.05), dark],
+        [Vector3(0, -0.04, 0.42), Vector3(0.05, 0.12, 0.3), Color(0.12, 0.14, 0.11)],
+        [Vector3(0, -0.1, 0.04), Vector3(0.04, 0.1, 0.08), dark],
+        [Vector3(0, -0.1, 0.2), Vector3(0.07, 0.08, 0.1), glove],
+        [Vector3(0, -0.03, -0.3), Vector3(0.075, 0.075, 0.14), glove]
+    ]))
     flash = OmniLight3D.new()
     flash.omni_range = 7.0
     flash.light_energy = 0.0
@@ -491,6 +698,7 @@ func _ui() -> void:
     var cr := _rect(Color.WHITE)
     cr.set_anchors_preset(Control.PRESET_FULL_RECT)
     cr.material = sm
+    cr.visible = not CS_STYLE
     post.add_child(cr)
     var sh2 := Shader.new()
     sh2.code = SCOPE
@@ -511,16 +719,29 @@ func _ui() -> void:
     ui["hp"] = _lbl("HP 100", Vector2(46, 78) * u, int(28 * u), Color(0.7, 1.0, 0.7))
     ui["obj"] = _lbl("", Vector2(sz.x / 2.0 - 190 * u, 30 * u), int(28 * u))
     ui["ammo"] = _lbl("", Vector2(sz.x - 420 * u, 30 * u), int(40 * u))
+    ui["fps"] = _lbl("", Vector2(sz.x - 420 * u, 84 * u), int(24 * u), Color(0.7, 1.0, 0.7))
     ui["gain"] = _lbl("", Vector2(sz.x / 2.0 - 120 * u, sz.y * 0.72), int(30 * u), Color(0.72, 0.92, 0.75))
     ui["hit"] = _lbl("X", Vector2(sz.x / 2.0 - 12 * u, sz.y / 2.0 - 22 * u), int(34 * u), Color(1, 0.3, 0.2))
     ui["hit"].modulate.a = 0.0
-    for k in ["rec", "tc", "hp", "obj", "ammo", "gain", "hit"]:
+    if CS_STYLE:
+        ui["hp"].position = Vector2(46, sz.y - 150 * u)
+        ui["hp"].add_theme_font_size_override("font_size", int(44 * u))
+    for k in ["rec", "tc", "hp", "obj", "ammo", "fps", "gain", "hit"]:
         hud.add_child(ui[k])
     var dot := _rect(Color(1, 1, 1, 0.8))
     dot.size = Vector2(5, 5) * u
     dot.position = sz / 2.0 - dot.size / 2.0
     hud.add_child(dot)
     ui["dot"] = dot
+    if CS_STYLE:
+        dot.color = Color(0, 0, 0, 0)
+        ui["rec"].visible = false
+        ui["tc"].visible = false
+        for b in [[-16.0, 1.5, 10.0, 2.0], [11.0, 1.5, 10.0, 2.0], [1.5, -16.0, 2.0, 10.0], [1.5, 11.0, 2.0, 10.0]]:
+            var bar := _rect(Color(0.2, 1.0, 0.3, 0.95))
+            bar.position = Vector2(b[0], b[1]) * u
+            bar.size = Vector2(b[2], b[3]) * u
+            dot.add_child(bar)
     var dm := _rect(Color(0.7, 0, 0, 0.0))
     dm.set_anchors_preset(Control.PRESET_FULL_RECT)
     hud.add_child(dm)
@@ -758,29 +979,67 @@ func _enemy(pos: Vector3, sniper: bool) -> void:
     e.add_child(cs)
     var body := Node3D.new()
     e.add_child(body)
-    var cl := Color(0.17, 0.19, 0.16)
-    _vp(body, Vector3(0, 1.17, 0), Vector3(0.5, 0.64, 0.27), cl, 0.9)
-    _vp(body, Vector3(0, 1.17, -0.02), Vector3(0.44, 0.3, 0.3), Color(0.1, 0.1, 0.1), 0.8)
-    _vp(body, Vector3(0, 1.58, 0), Vector3(0.2, 0.22, 0.2), Color(0.55, 0.42, 0.34), 0.9)
-    _vp(body, Vector3(0, 1.71, 0), Vector3(0.27, 0.1, 0.27), Color(0.08, 0.09, 0.08), 0.6)
+    var cm := Color(0.28, 0.3, 0.22) if not sniper else Color(0.24, 0.28, 0.18)
+    var tn := Color(0.42, 0.36, 0.26)
+    var blk := Color(0.1, 0.1, 0.11)
+    var oli := Color(0.2, 0.23, 0.17)
+    var gl := 0.7 if not sniper else 1.25
+    var parts: Array = [
+        [Vector3(0, 1.2, 0), Vector3(0.42, 0.5, 0.24), cm],
+        [Vector3(0, 1.22, -0.03), Vector3(0.46, 0.44, 0.3), tn],
+        [Vector3(0, 1.22, 0.1), Vector3(0.44, 0.42, 0.08), tn],
+        [Vector3(0, 0.98, 0), Vector3(0.5, 0.14, 0.3), oli],
+        [Vector3(-0.12, 1.1, -0.18), Vector3(0.09, 0.14, 0.07), oli],
+        [Vector3(0, 1.1, -0.18), Vector3(0.09, 0.14, 0.07), oli],
+        [Vector3(0.12, 1.1, -0.18), Vector3(0.09, 0.14, 0.07), oli],
+        [Vector3(0.2, 1.42, 0.06), Vector3(0.07, 0.16, 0.08), blk],
+        [Vector3(0, 1.2, 0.2), Vector3(0.36, 0.42, 0.16), oli],
+        [Vector3(0, 1.43, 0), Vector3(0.14, 0.08, 0.14), blk],
+        [Vector3(0, 1.56, 0), Vector3(0.19, 0.22, 0.2), Color(0.5, 0.4, 0.33)],
+        [Vector3(0, 1.5, 0), Vector3(0.2, 0.11, 0.21), blk],
+        [Vector3(0, 1.68, 0), Vector3(0.27, 0.13, 0.29), Color(0.13, 0.14, 0.12)],
+        [Vector3(0, 1.64, -0.14), Vector3(0.25, 0.04, 0.06), Color(0.13, 0.14, 0.12)],
+        [Vector3(0, 1.7, -0.16), Vector3(0.1, 0.06, 0.07), blk],
+        [Vector3(0, 1.62, -0.13), Vector3(0.22, 0.05, 0.04), blk],
+        [Vector3(-0.14, 1.58, 0), Vector3(0.05, 0.1, 0.1), tn],
+        [Vector3(0.14, 1.58, 0), Vector3(0.05, 0.1, 0.1), tn],
+        [Vector3(-0.31, 1.28, -0.02), Vector3(0.11, 0.34, 0.13), cm],
+        [Vector3(0.31, 1.3, -0.1), Vector3(0.11, 0.3, 0.13), cm],
+        [Vector3(0.28, 1.15, -0.32), Vector3(0.1, 0.1, 0.42), cm],
+        [Vector3(-0.14, 1.18, -0.4), Vector3(0.1, 0.1, 0.48), cm],
+        [Vector3(0.28, 1.15, -0.55), Vector3(0.1, 0.1, 0.12), blk],
+        [Vector3(-0.12, 1.2, -0.66), Vector3(0.1, 0.1, 0.12), blk],
+        [Vector3(0.1, 1.2, -0.5), Vector3(0.06, 0.09, 0.36), blk],
+        [Vector3(0.1, 1.22, -0.5 - gl * 0.5), Vector3(0.03, 0.03, gl), blk],
+        [Vector3(0.1, 1.2, -0.2), Vector3(0.06, 0.1, 0.2), blk],
+        [Vector3(0.1, 1.08, -0.5), Vector3(0.04, 0.16, 0.08), blk],
+        [Vector3(0.1, 1.29, -0.5), Vector3(0.05, 0.06, 0.12 if not sniper else 0.3), blk]
+    ]
+    var bm := _vmesh(parts)
+    bm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+    body.add_child(bm)
     var face := MeshInstance3D.new()
     var qm := QuadMesh.new()
-    qm.size = Vector2(0.17, 0.17)
+    qm.size = Vector2(0.15, 0.08)
     face.mesh = qm
     face.material_override = _face_mat()
-    face.position = Vector3(0, 1.58, -0.102)
+    face.position = Vector3(0, 1.56, -0.102)
     face.rotation.y = PI
     body.add_child(face)
     var legs: Array = []
     for s in [-1.0, 1.0]:
         var pv := Node3D.new()
-        pv.position = Vector3(s * 0.12, 0.9, 0)
+        pv.position = Vector3(s * 0.11, 0.9, 0)
         body.add_child(pv)
-        _vp(pv, Vector3(0, -0.45, 0), Vector3(0.18, 0.9, 0.2), Color(0.14, 0.15, 0.12), 0.9)
+        var lm := _vmesh([
+            [Vector3(0, -0.45, 0), Vector3(0.17, 0.9, 0.19), cm.darkened(0.15)],
+            [Vector3(0, -0.5, -0.1), Vector3(0.15, 0.14, 0.06), blk],
+            [Vector3(0, -0.84, -0.03), Vector3(0.17, 0.14, 0.27), blk],
+            [Vector3(s * 0.09, -0.25, 0), Vector3(0.06, 0.14, 0.12), tn]
+        ])
+        lm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+        pv.add_child(lm)
         legs.append(pv)
-    _vp(body, Vector3(-0.33, 1.2, -0.12), Vector3(0.12, 0.5, 0.14), cl, 0.9)
-    _vp(body, Vector3(0.28, 1.25, -0.28), Vector3(0.12, 0.12, 0.5), cl, 0.9)
-    _vp(body, Vector3(0.2, 1.22, -0.45), Vector3(0.06, 0.09, 1.0 if sniper else 0.7), Color(0.06, 0.06, 0.06), 0.4, 0.5)
     e.set_meta("d", {"hp": 100.0, "st": 0, "path": [], "t": 0.0, "rep": 0.0, "vel": Vector3.ZERO, "last": pos, "exp": 0.0, "lost": 0.0, "cd": 1.0, "burst": 0, "dead": false, "sn": sniper, "ph": 0.0, "legs": legs, "body": body, "hear": -9.0})
     enemies.append(e)
 
@@ -949,6 +1208,16 @@ func _physics_process(dt: float) -> void:
 
 func _process(dt: float) -> void:
     t_rec += dt
+    adapt_t += dt
+    ui["fps"].text = "%d FPS" % int(Engine.get_frames_per_second())
+    if adapt_t > 2.0:
+        adapt_t = 0.0
+        var vp := get_viewport()
+        var fr := Engine.get_frames_per_second()
+        if fr < 52.0 and vp.scaling_3d_scale > 0.5:
+            vp.scaling_3d_scale -= 0.05
+        elif fr > 59.0 and vp.scaling_3d_scale < 0.85:
+            vp.scaling_3d_scale += 0.03
     cd = maxf(0.0, cd - dt)
     var mx := 30 if wk == 0 else 5
     var a: Array = ammo[wk]
