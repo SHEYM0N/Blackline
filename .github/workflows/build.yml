@@ -11,14 +11,10 @@ jobs:
     timeout-minutes: 45
     env:
       GODOT_VERSION: "4.3"
+      GODOT_SILENCE_ROOT_WARNING: "1"
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Xvfb and required system packages
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y xvfb xauth xz-utils
 
       - name: Download free CC0 PBR textures (optional)
         run: |
@@ -67,12 +63,12 @@ jobs:
           grep -q 'name="Android"' export_presets.cfg
           mkdir -p build
 
-      - name: Import project using virtual display
+      - name: Import project in true headless mode
         shell: bash
         run: |
           set -o pipefail
-          echo "Importing project under Xvfb to avoid headless import stalls..."
-          timeout 15m xvfb-run -a godot --path . --import --verbose 2>&1 | tee build/import.log
+          echo "Importing project without Xvfb, X11, Wayland or Vulkan display initialization..."
+          timeout 15m godot --headless --editor --path . --import --verbose 2>&1 | tee build/import.log
 
       - name: Export Android APK
         shell: bash
@@ -83,8 +79,9 @@ jobs:
           test -s build/blackline.apk
           echo "APK created successfully."
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload build logs and APK
         if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: blackline-apk
           path: build/
