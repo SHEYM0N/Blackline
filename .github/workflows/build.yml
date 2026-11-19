@@ -1,88 +1,135 @@
 name: Build Android APK
 
 on:
-  workflow_dispatch:
   push:
     branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    name: Build BLACKLINE for Android
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
+
     env:
       GODOT_VERSION: "4.3"
-      GODOT_SILENCE_ROOT_WARNING: "1"
+      ANDROID_PLATFORM: "android-34"
+      ANDROID_BUILD_TOOLS: "34.0.0"
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out project
+        uses: actions/checkout@v7
 
-      - name: Download free CC0 PBR textures (optional)
+      - name: Verify project structure
+        shell: bash
         run: |
-          mkdir -p tex
-          cd tex
-          for id in PaintedPlaster017 WoodFloor041 Ground037 Bark001 Concrete034; do
-            curl -fsSL -m 90 -o t.zip "https://ambientcg.com/get?file=${id}_1K-JPG.zip" && unzip -oq t.zip || echo "Skipped optional texture: $id"
-          done
-          rm -f t.zip *.usda *.mtlx *.png || true
-
-      - name: Install Godot and Android export templates
-        run: |
-          B="https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable"
-          wget -q "$B/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
-          wget -q "$B/Godot_v${GODOT_VERSION}-stable_export_templates.tpz"
-          unzip -q "Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
-          sudo mv "Godot_v${GODOT_VERSION}-stable_linux.x86_64" /usr/local/bin/godot
-          mkdir -p ~/.local/share/godot/export_templates
-          unzip -q "Godot_v${GODOT_VERSION}-stable_export_templates.tpz"
-          mv templates ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable
-          godot --version
-
-      - name: Configure Android SDK and debug signing
-        run: |
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platform-tools" "build-tools;34.0.0" "platforms;android-34" "cmdline-tools;latest" > /dev/null
-          keytool -keyalg RSA -genkeypair -alias androiddebugkey -keypass android -keystore "$HOME/debug.keystore" -storepass android -dname "CN=Android Debug,O=Android,C=US" -validity 9999 -deststoretype pkcs12
-          mkdir -p ~/.config/godot
-          cat > ~/.config/godot/editor_settings-4.3.tres <<EOT
-          [gd_resource type="EditorSettings" format=3]
-
-          [resource]
-          export/android/android_sdk_path = "$ANDROID_HOME"
-          export/android/java_sdk_path = "$JAVA_HOME_17_X64"
-          export/android/debug_keystore = "$HOME/debug.keystore"
-          export/android/debug_keystore_user = "androiddebugkey"
-          export/android/debug_keystore_pass = "android"
-          EOT
-
-      - name: Verify project files
-        run: |
+          set -euo pipefail
           test -f project.godot
           test -f main.tscn
           test -f main.gd
           test -f export_presets.cfg
           grep -q 'name="Android"' export_presets.cfg
           mkdir -p build
+          echo "Project files found."
 
-      - name: Import project in true headless mode
+      - name: Install Godot 4.3 and Android export templates
         shell: bash
         run: |
-          set -o pipefail
-          echo "Importing project without Xvfb, X11, Wayland or Vulkan display initialization..."
-          timeout 15m godot --headless --editor --path . --import --verbose 2>&1 | tee build/import.log
+          set -euo pipefail
+          BASE_URL="https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable"
 
-      - name: Export Android APK
+          wget -q "${BASE_URL}/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
+          wget -q "${BASE_URL}/Godot_v${GODOT_VERSION}-stable_export_templates.tpz"
+
+          unzip -q "Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
+          sudo install -m 0755 "Godot_v${GODOT_VERSION}-stable_linux.x86_64" /usr/local/bin/godot
+
+          mkdir -p "$HOME/.local/share/godot/export_templates"
+          unzip -q "Godot_v${GODOT_VERSION}-stable_export_templates.tpz"
+          mv templates "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable"
+
+          godot --version
+
+      - name: Configure Android SDK and signing
         shell: bash
         run: |
-          set -o pipefail
-          echo "Exporting Android debug APK..."
-          timeout 20m godot --headless --path . --export-debug "Android" build/blackline.apk 2>&1 | tee build/export.log
+          set -euo pipefail
+
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          JAVA_ROOT="${JAVA_HOME_17_X64:-${JAVA_HOME:-}}"
+
+          test -n "$SDK_ROOT" || { echo "Android SDK path was not found on this runner."; exit 1; }
+          test -n "$JAVA_ROOT" || { echo "Java JDK path was not found on this runner."; exit 1; }
+          test -x "$JAVA_ROOT/bin/java" || { echo "Java executable is missing."; exit 1; }
+
+          echo "Android SDK: $SDK_ROOT"
+          echo "Java JDK: $JAVA_ROOT"
+          "$JAVA_ROOT/bin/java" -version
+
+          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          test -x "$SDKMANAGER" || { echo "Android sdkmanager was not found: $SDKMANAGER"; exit 1; }
+
+          yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses >/dev/null || true
+          "$SDKMANAGER" --sdk_root="$SDK_ROOT" \
+            "platform-tools" \
+            "platforms;${ANDROID_PLATFORM}" \
+            "build-tools;${ANDROID_BUILD_TOOLS}"
+
+          keytool -genkeypair -noprompt \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -alias androiddebugkey \
+            -keystore "$HOME/debug.keystore" \
+            -storetype PKCS12 \
+            -storepass android -keypass android \
+            -dname "CN=Android Debug,O=Android,C=US"
+
+          mkdir -p "$HOME/.config/godot"
+          cat > "$HOME/.config/godot/editor_settings-${GODOT_VERSION}.tres" <<EOF
+          [gd_resource type="EditorSettings" format=3]
+
+          [resource]
+          export/android/android_sdk_path = "$SDK_ROOT"
+          export/android/java_sdk_path = "$JAVA_ROOT"
+          export/android/debug_keystore = "$HOME/debug.keystore"
+          export/android/debug_keystore_user = "androiddebugkey"
+          export/android/debug_keystore_pass = "android"
+          EOF
+
+      - name: Export Android APK (headless, no separate editor import)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "This project creates its scene and materials from GDScript."
+          echo "Optional downloaded textures are omitted; the project has procedural fallbacks."
+          echo "Starting direct headless Android export..."
+
+          set +e
+          timeout --signal=TERM --kill-after=30s 30m \
+            godot --headless --path . --verbose \
+            --export-debug "Android" build/blackline.apk \
+            2>&1 | tee build/export.log
+          result=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$result" -ne 0 ]; then
+            echo "Godot export failed with exit code $result."
+            exit "$result"
+          fi
+
           test -s build/blackline.apk
-          echo "APK created successfully."
+          unzip -t build/blackline.apk
+          echo "APK export completed successfully."
 
-      - name: Upload build logs and APK
+      - name: Upload APK and diagnostic log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: blackline-apk
-          path: build/
+          path: |
+            build/blackline.apk
+            build/export.log
           if-no-files-found: warn
+          retention-days: 7
