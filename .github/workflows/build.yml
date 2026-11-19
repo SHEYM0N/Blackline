@@ -8,24 +8,28 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       GODOT_VERSION: "4.3"
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download free CC0 PBR textures (optional - the game has procedural fallbacks)
+      - name: Install Xvfb and required system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb xauth xz-utils
+
+      - name: Download free CC0 PBR textures (optional)
         run: |
           mkdir -p tex
           cd tex
           for id in PaintedPlaster017 WoodFloor041 Ground037 Bark001 Concrete034; do
-            curl -fsSL -m 90 -o t.zip "https://ambientcg.com/get?file=${id}_1K-JPG.zip" && unzip -oq t.zip || echo "skipped $id"
+            curl -fsSL -m 90 -o t.zip "https://ambientcg.com/get?file=${id}_1K-JPG.zip" && unzip -oq t.zip || echo "Skipped optional texture: $id"
           done
           rm -f t.zip *.usda *.mtlx *.png || true
-          ls
 
-      - name: Install Godot and export templates
+      - name: Install Godot and Android export templates
         run: |
           B="https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable"
           wget -q "$B/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
@@ -35,8 +39,9 @@ jobs:
           mkdir -p ~/.local/share/godot/export_templates
           unzip -q "Godot_v${GODOT_VERSION}-stable_export_templates.tpz"
           mv templates ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable
+          godot --version
 
-      - name: Android SDK, debug keystore, editor settings
+      - name: Configure Android SDK and debug signing
         run: |
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platform-tools" "build-tools;34.0.0" "platforms;android-34" "cmdline-tools;latest" > /dev/null
@@ -53,18 +58,28 @@ jobs:
           export/android/debug_keystore_pass = "android"
           EOT
 
-      - name: Import assets and export APK
+      - name: Verify project files
+        run: |
+          test -f project.godot
+          test -f main.tscn
+          test -f main.gd
+          test -f export_presets.cfg
+          grep -q 'name="Android"' export_presets.cfg
+          mkdir -p build
+
+      - name: Import project using virtual display
         shell: bash
         run: |
           set -o pipefail
-          mkdir -p build
+          echo "Importing project under Xvfb to avoid headless import stalls..."
+          timeout 15m xvfb-run -a godot --path . --import --verbose 2>&1 | tee build/import.log
 
-          echo "Starting Godot asset import (10 minute limit)..."
-          timeout 10m godot --headless --path . --import --verbose 2>&1 | tee build/import.log
-
-          echo "Starting Android APK export (10 minute limit)..."
-          timeout 10m godot --headless --path . --export-debug "Android" build/blackline.apk 2>&1 | tee build/export.log
-
+      - name: Export Android APK
+        shell: bash
+        run: |
+          set -o pipefail
+          echo "Exporting Android debug APK..."
+          timeout 20m godot --headless --path . --export-debug "Android" build/blackline.apk 2>&1 | tee build/export.log
           test -s build/blackline.apk
           echo "APK created successfully."
 
